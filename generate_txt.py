@@ -52,14 +52,10 @@ def generate_split_txt1(data_dir, output_dir):
     write_txt(cases, os.path.join(output_dir, 'train.txt'), data_dir)
 
 
-# ====== 用法示例 ======
+
 if __name__ == '__main__':
     generate_split_txt(
         data_dir='datasets/Competition_Dataset/Train',
         output_dir='datasets/Competition_Dataset/Train'
     )
 
-    # generate_split_txt1(
-    #     data_dir='datasets/MyoPS_2020_Dataset/train25',
-    #     output_dir='datasets/MyoPS_2020_Dataset/train25'
-    # )

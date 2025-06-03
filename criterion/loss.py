@@ -52,29 +52,55 @@ class DiceLoss(nn.Module):
         return total_loss/target.shape[1]
 
 
-class WCELoss(nn.Module):
-    def __init__(self):
-        super(WCELoss, self).__init__()
-    
-    def weight_function(self, target):
+# class WCELoss(nn.Module):
+#     def __init__(self):
+#         super(WCELoss, self).__init__()
+#
+#     def weight_function(self, target):
+#
+#         mask = torch.argmax(target, dim=1)
+#         voxels_sum = mask.shape[0] * mask.shape[1] * mask.shape[2]
+#         weights = []
+#         for i in range(mask.max()+1):
+#             voxels_i = [mask==i][0].sum().cpu().numpy()
+#             w_i = np.log(voxels_sum/voxels_i).astype(np.float32)
+#             weights.append(w_i)
+#         weights = torch.from_numpy(np.array(weights)).cuda()
+#
+#         return weights
+#
+#     def forward(self, predict, target):
+#
+#         ce_loss = torch.mean(-target * torch.log(predict + 1e-10), dim=(0,2,3))
+#         weights = self.weight_function(target)
+#         loss = weights * ce_loss
+#
+#         return loss.sum()
 
-        mask = torch.argmax(target, dim=1)
-        voxels_sum = mask.shape[0] * mask.shape[1] * mask.shape[2]
-        weights = []
-        for i in range(mask.max()+1):
-            voxels_i = [mask==i][0].sum().cpu().numpy()
-            w_i = np.log(voxels_sum/voxels_i).astype(np.float32)
-            weights.append(w_i)
-        weights = torch.from_numpy(np.array(weights)).cuda()
-        
+class WCELoss(nn.Module):
+    def __init__(self, num_classes=3):
+        super(WCELoss, self).__init__()
+        self.num_classes = num_classes
+
+    def weight_function(self, target):
+        mask = torch.argmax(target, dim=1)  # [B, H, W]
+        voxels_sum = mask.numel()
+        weights = torch.zeros(self.num_classes, dtype=torch.float32, device=target.device)
+
+        for i in range(self.num_classes):
+            voxels_i = (mask == i).sum().item()
+            if voxels_i > 0:
+                weights[i] = torch.log(
+                    torch.tensor(voxels_sum / (voxels_i + 1e-10), dtype=torch.float32, device=target.device))
+            else:
+                weights[i] = 0.0  # 类别缺失时设为 0
+
         return weights
 
     def forward(self, predict, target):
-
-        ce_loss = torch.mean(-target * torch.log(predict + 1e-10), dim=(0,2,3))
-        weights = self.weight_function(target)
+        ce_loss = torch.mean(-target * torch.log(predict + 1e-10), dim=(0, 2, 3))  # [C]
+        weights = self.weight_function(target)  # [C]
         loss = weights * ce_loss
-        
         return loss.sum()
 
 
@@ -129,7 +155,8 @@ class SegmentationLoss(nn.Module):
         super(SegmentationLoss, self).__init__()
 
         self.dice_loss = DiceLoss()
-        self.wce_loss = WCELoss()
+        # self.wce_loss = WCELoss()
+        self.wce_loss = WCELoss(num_classes=3)
 
     def forward(self, predict, target):
 
@@ -139,6 +166,44 @@ class SegmentationLoss(nn.Module):
 
         return loss
 
+
+# class MyoPSLoss(nn.Module):
+#     def __init__(self):
+#         super(MyoPSLoss, self).__init__()
+#
+#         self.seg_loss = SegmentationLoss()
+#         self.invariant_loss = InvariantLoss()
+#         self.inclusive_scar = InclusiveLossScar()
+#         self.inclusive_edema = InclusiveLossEdema()
+#
+#     def forward(self, seg, label):
+#
+#         # seg = {'C0': seg_C0, 'LGE': seg_LGE, 'T2': seg_T2, 'mapping': seg_mapping}
+#         # label = {'cardiac': cardiac_gd, 'scar': scar_gd, 'edema': edema_gd}
+#
+#         # seg_loss
+#         loss_seg = self.seg_loss(seg['C0'], label['cardiac']) + \
+#                 2 * self.seg_loss(seg['LGE'], label['scar']) + \
+#                 2 * self.seg_loss(seg['T2'], label['edema']) + \
+#                 2 * self.seg_loss(seg['mapping'], label['scar'])
+#
+#         # invariant loss
+#         myo_C0 = torch.cat([seg['C0'][:,0:1,:,:]+seg['C0'][:,2:3,:,:], seg['C0'][:,1:2,:,:]], dim=1)
+#         myo_LGE = torch.cat([seg['LGE'][:,0:1,:,:], seg['LGE'][:,1:2,:,:]+seg['LGE'][:,2:3,:,:]], dim=1)
+#         myo_T2 = torch.cat([seg['T2'][:,0:1,:,:], seg['T2'][:,1:2,:,:]+seg['T2'][:,2:3,:,:]], dim=1)
+#         myo_mapping = torch.cat([seg['mapping'][:,0:1,:,:], seg['mapping'][:,1:2,:,:]+seg['mapping'][:,2:3,:,:]], dim=1)
+#         loss_invariant = self.invariant_loss(myo_C0, myo_LGE) + \
+#                         self.invariant_loss(myo_C0, myo_T2) + \
+#                         self.invariant_loss(myo_C0, myo_mapping)
+#
+#         # inclusive loss
+#         loss_inclusive = self.inclusive_scar(seg['LGE'][:,2,:,:], label['edema'][:,2,:,:]) + \
+#                         self.inclusive_edema(seg['T2'][:,2,:,:], label['scar'][:,2,:,:]) + \
+#                         self.inclusive_scar(seg['mapping'][:,2,:,:], label['edema'][:,2,:,:])
+#
+#         loss = loss_seg + loss_invariant + loss_inclusive
+#
+#         return loss_seg, loss_invariant, loss_inclusive, loss
 
 class MyoPSLoss(nn.Module):
     def __init__(self):
@@ -150,29 +215,26 @@ class MyoPSLoss(nn.Module):
         self.inclusive_edema = InclusiveLossEdema()
 
     def forward(self, seg, label):
+        """
+        seg: dict 包含 'C0', 'LGE', 'T2'
+        label: dict 包含 'cardiac', 'scar', 'edema'
+        """
 
-        # seg = {'C0': seg_C0, 'LGE': seg_LGE, 'T2': seg_T2, 'mapping': seg_mapping}
-        # label = {'cardiac': cardiac_gd, 'scar': scar_gd, 'edema': edema_gd}
-
-        # seg_loss
+        # segmentation loss（去除 mapping）
         loss_seg = self.seg_loss(seg['C0'], label['cardiac']) + \
-                2 * self.seg_loss(seg['LGE'], label['scar']) + \
-                2 * self.seg_loss(seg['T2'], label['edema']) + \
-                2 * self.seg_loss(seg['mapping'], label['scar'])
+                   2 * self.seg_loss(seg['LGE'], label['scar']) + \
+                   2 * self.seg_loss(seg['T2'], label['edema'])
 
-        # invariant loss
-        myo_C0 = torch.cat([seg['C0'][:,0:1,:,:]+seg['C0'][:,2:3,:,:], seg['C0'][:,1:2,:,:]], dim=1)
-        myo_LGE = torch.cat([seg['LGE'][:,0:1,:,:], seg['LGE'][:,1:2,:,:]+seg['LGE'][:,2:3,:,:]], dim=1)
-        myo_T2 = torch.cat([seg['T2'][:,0:1,:,:], seg['T2'][:,1:2,:,:]+seg['T2'][:,2:3,:,:]], dim=1)
-        myo_mapping = torch.cat([seg['mapping'][:,0:1,:,:], seg['mapping'][:,1:2,:,:]+seg['mapping'][:,2:3,:,:]], dim=1)
+        # invariant loss（去除 mapping）
+        myo_C0 = torch.cat([seg['C0'][:, 0:1, :, :] + seg['C0'][:, 2:3, :, :], seg['C0'][:, 1:2, :, :]], dim=1)
+        myo_LGE = torch.cat([seg['LGE'][:, 0:1, :, :], seg['LGE'][:, 1:2, :, :] + seg['LGE'][:, 2:3, :, :]], dim=1)
+        myo_T2 = torch.cat([seg['T2'][:, 0:1, :, :], seg['T2'][:, 1:2, :, :] + seg['T2'][:, 2:3, :, :]], dim=1)
         loss_invariant = self.invariant_loss(myo_C0, myo_LGE) + \
-                        self.invariant_loss(myo_C0, myo_T2) + \
-                        self.invariant_loss(myo_C0, myo_mapping)
+                         self.invariant_loss(myo_C0, myo_T2)
 
-        # inclusive loss
-        loss_inclusive = self.inclusive_scar(seg['LGE'][:,2,:,:], label['edema'][:,2,:,:]) + \
-                        self.inclusive_edema(seg['T2'][:,2,:,:], label['scar'][:,2,:,:]) + \
-                        self.inclusive_scar(seg['mapping'][:,2,:,:], label['edema'][:,2,:,:])
+        # inclusive loss（去除 mapping）
+        loss_inclusive = self.inclusive_scar(seg['LGE'][:, 2, :, :], label['scar'][:, 2, :, :]) + \
+                         self.inclusive_edema(seg['T2'][:, 2, :, :], label['edema'][:, 2, :, :])
 
         loss = loss_seg + loss_invariant + loss_inclusive
 

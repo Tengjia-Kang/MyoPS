@@ -5,7 +5,7 @@ import nibabel as nib
 from torch.utils.data import Dataset
 from utils.tools import Normalization, ImageTransform, LabelTransform
     
-
+#
 # class CrossModalDataLoader(Dataset):
 #
 #     def __init__(self, path, file_name, dim, max_iters = None, stage = 'Train'):
@@ -115,14 +115,16 @@ class CrossModalDataLoader(Dataset):
         self.stage = stage
         self.modalities = modalities if modalities is not None else ['C0', 'LGE', 'T2', 'T1m', 'T2starm']
 
+        # 读取训练集列表
         self.Img = [item.strip().split() for item in open(self.path + file_name)]
         if max_iters is not None:
+            # 如果max_iters不为None，则将训练集列表重复max_iters/len(self.Img)次
             self.Img = self.Img * int(np.ceil(float(max_iters) / len(self.Img)))
 
         self.files = []
         for item in self.Img:
-            img_path, gt_path, imgidx = item
-            file_dict = {'index': int(imgidx), 'label': os.path.join(gt_path + '_gd.nii.gz')}
+            img_path, gt_path, imgidx = item # 图片路径，标签路径，图片索引(切片索引)
+            file_dict = {'index': int(imgidx), 'label': os.path.join(gt_path + '_gd.nii.gz')} # 标签路径
             if 'C0' in self.modalities:
                 file_dict['C0'] = os.path.join(img_path + '_C0.nii.gz')
             if 'LGE' in self.modalities:
@@ -145,10 +147,10 @@ class CrossModalDataLoader(Dataset):
     def __getitem__(self, index):
         file_path = self.files[index]
         img_slices = []
-
-        # 各个模态的图像拼接在一起
+        # 读取index切片 各个模态的图像 [(H,W,1), (H,W,1), (H,W,1)]
         for modality in self.modalities:
             raw_data = nib.load(file_path[modality]).get_fdata()
+            
             if modality == 'T1m' and int(raw_data.max()) != 0:
                 raw_data = self.normalize(raw_data, 'Truncate')
             elif modality != 'T1m':
@@ -171,3 +173,130 @@ class CrossModalDataLoader(Dataset):
 
         label = self.label_transform(imgs[-1])
         return (*img_tensors, *label)
+
+class MultiModalCardiacDataset(Dataset):
+    def __init__(self, data_root, mode='train', transform=None):
+        """
+        多模态心脏分割数据集
+        
+        Args:
+            data_root: 数据根目录
+            mode: 'train' 或 'test'
+            transform: 数据增强转换
+        """
+        self.data_root = data_root
+        self.mode = mode
+        self.transform = transform
+        self.normalize = Normalization()
+        
+        # 获取所有case
+        self.cases = []
+        for case in os.listdir(data_root):
+            if case.startswith('Case'):
+                case_dir = os.path.join(data_root, case)
+                if os.path.isdir(case_dir):
+                    self.cases.append(case)
+        self.cases.sort()
+        
+    def __len__(self):
+        return len(self.cases)
+    
+    def load_nii(self, file_path):
+        """加载nii.gz文件"""
+        img = nib.load(file_path)
+        return img.get_fdata()
+    
+    def process_label(self, label):
+        """处理标签为三种模式"""
+        cardiac_label = np.zeros_like(label)
+        scar_label = np.zeros_like(label)
+        edema_label = np.zeros_like(label)
+        
+        # Cardiac模式
+        cardiac_label[label == 200] = 1  # 心肌
+        cardiac_label[label == 500] = 2  # 心腔
+        
+        # Scar模式
+        scar_label[label == 200] = 1     # 心肌
+        scar_label[label == 1220] = 1    # 心肌
+        scar_label[label == 600] = 2     # 疤痕
+        
+        # Edema模式
+        edema_label[label == 200] = 1    # 心肌水肿
+        edema_label[label == 1220] = 2   # 水肿
+        edema_label[label == 2221] = 2   # 远端水肿
+        
+        return cardiac_label, scar_label, edema_label
+    
+    def __getitem__(self, idx):
+        case = self.cases[idx]
+        case_dir = os.path.join(self.data_root, case)
+        
+        # 加载三个模态的图像
+        C0_path = os.path.join(case_dir, f'{case}_C0.nii.gz')
+        LGE_path = os.path.join(case_dir, f'{case}_LGE.nii.gz')
+        T2_path = os.path.join(case_dir, f'{case}_T2.nii.gz')
+        
+        C0_img = self.load_nii(C0_path)
+        LGE_img = self.load_nii(LGE_path)
+        T2_img = self.load_nii(T2_path)
+        
+        # 标准化
+        C0_img = self.normalize(C0_img, 'Zero_Mean_Unit_Std')
+        LGE_img = self.normalize(LGE_img, 'Zero_Mean_Unit_Std')
+        T2_img = self.normalize(T2_img, 'Zero_Mean_Unit_Std')
+        
+        # 如果是训练模式，加载标签
+        if self.mode == 'train':
+            label_path = os.path.join(case_dir, f'{case}_gd.nii.gz')
+            label = self.load_nii(label_path)
+            cardiac_label, scar_label, edema_label = self.process_label(label)
+            
+            # 转换为tensor
+            C0_img = torch.from_numpy(C0_img).float()
+            LGE_img = torch.from_numpy(LGE_img).float()
+            T2_img = torch.from_numpy(T2_img).float()
+            cardiac_label = torch.from_numpy(cardiac_label).long()
+            scar_label = torch.from_numpy(scar_label).long()
+            edema_label = torch.from_numpy(edema_label).long()
+            
+            # 应用数据增强
+            if self.transform:
+                data = {
+                    'C0': C0_img,
+                    'LGE': LGE_img,
+                    'T2': T2_img,
+                    'cardiac': cardiac_label,
+                    'scar': scar_label,
+                    'edema': edema_label
+                }
+                data = self.transform(data)
+                C0_img = data['C0']
+                LGE_img = data['LGE']
+                T2_img = data['T2']
+                cardiac_label = data['cardiac']
+                scar_label = data['scar']
+                edema_label = data['edema']
+            
+            return {
+                'C0': C0_img,
+                'LGE': LGE_img,
+                'T2': T2_img,
+                'cardiac_label': cardiac_label,
+                'scar_label': scar_label,
+                'edema_label': edema_label,
+                'case_name': case
+            }
+        
+        else:  # test模式
+            # 转换为tensor
+            C0_img = torch.from_numpy(C0_img).float()
+            LGE_img = torch.from_numpy(LGE_img).float()
+            T2_img = torch.from_numpy(T2_img).float()
+            
+            return {
+                'C0': C0_img,
+                'LGE': LGE_img,
+                'T2': T2_img,
+                'case_name': case
+            }

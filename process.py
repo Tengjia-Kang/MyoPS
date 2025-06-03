@@ -8,7 +8,7 @@ from skimage import measure
 class LargestConnectedComponents(object):
     def __call__(self, mask, mode):
         
-        mask = mask.numpy()
+        mask = mask.detach().numpy()
         
         # keep a heart connectivity 
         heart_slice = np.where((mask>0), 1, 0)

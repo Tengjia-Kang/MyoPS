@@ -174,10 +174,6 @@ class ImageTransform(object):
 
         return transform(image)
 
-
-
-
-
 # 把原始的标签图（值如 200, 500, 600, 1220, 2221）映射到特定任务的类别标签：
 # label transform
 class LabelTransform(object):
