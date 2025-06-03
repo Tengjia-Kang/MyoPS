@@ -10,7 +10,7 @@ nii_img = nib.load(nii_path)
 header = nii_img.header
 print(header)
 # 获取 numpy 数组
-img = nii_img.get_fdata()  # shape: [H, W, D]，一般是 (256, 256, 50)
+img = nii_img.get_fdata()  # shape: [H, W, D]，一般是 (H, W, D)
 
 print("维度:", header.get_data_shape())
 print("体素尺寸:", header.get_zooms())

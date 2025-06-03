@@ -52,6 +52,75 @@ def mask_to_rgb(mask):
     return rgb / 255.0  # 转为 0~1 float
 
 
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+
+def visualize_medical_images(img_C0, img_LGE, img_T2,
+                             label_cardiac, label_scar, label_edema,
+                             slice_idx=100, use_gpu=True):
+    """
+    修复后的医学图像可视化函数（支持多模态+标签叠加）
+    """
+
+    # 统一转GPU数据到CPU并处理维度
+    def to_np(img):
+        if use_gpu:
+            img = img.detach().cpu()  # 移除梯度并转到CPU
+        return img.squeeze().numpy()  # 移除所有单维度（如batch或channel）
+
+    # 转换所有输入数据
+    img_C0_np = to_np(img_C0)
+    img_LGE_np = to_np(img_LGE)
+    img_T2_np = to_np(img_T2)
+    label_cardiac_np = to_np(label_cardiac)[0,:,:]
+    label_scar_np = to_np(label_scar)[0,:,:]
+    label_edema_np = to_np(label_edema)[0,:,:]
+
+    # 确保标签是二维 (H, W)
+    assert label_cardiac_np.ndim == 2, f"Cardiac label shape {label_cardiac_np.shape} is invalid"
+    assert label_scar_np.ndim == 2, f"Scar label shape {label_scar_np.shape} is invalid"
+    assert label_edema_np.ndim == 2, f"Edema label shape {label_edema_np.shape} is invalid"
+
+    # 反归一化函数（根据实际预处理调整）
+    def unnormalize(img):
+        return (img * 200) + 100  # 假设原始范围是 [0, 400]
+
+    # 创建画布
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    plt.subplots_adjust(wspace=0.1, hspace=0.3)
+
+    # 显示模态图像（修复维度）
+    axes[0, 0].imshow(unnormalize(img_C0_np)[slice_idx], cmap='gray')  # 取中间切片
+    axes[0, 1].imshow(unnormalize(img_LGE_np)[slice_idx], cmap='hot')
+    axes[0, 2].imshow(unnormalize(img_T2_np)[slice_idx], cmap='viridis')
+
+    # 生成叠加标签（确保形状为 (H, W, 3)）
+    combined_labels = np.zeros((label_cardiac_np.shape[0], label_cardiac_np.shape[1], 3), dtype=np.float32)
+    combined_labels[..., 0] = label_scar_np  # 红色通道：疤痕
+    combined_labels[..., 1] = label_edema_np  # 绿色通道：水肿
+    combined_labels[..., 2] = label_cardiac_np  # 蓝色通道：心脏边界
+
+    # 显示叠加结果（归一化到 [0,1]）
+    axes[1, 0].imshow(unnormalize(img_LGE_np)[slice_idx], cmap='gray')
+    axes[1, 0].imshow(combined_labels / combined_labels.max(), alpha=0.5)
+    axes[1, 0].set_title('Combined Labels Overlay')
+
+    # 单独显示各标签
+    axes[1, 1].imshow(label_scar_np, cmap='Reds')
+    axes[1, 2].imshow(label_edema_np, cmap='Greens')
+
+    # 关闭坐标轴
+    for ax in axes.flat:
+        ax.axis('off')
+
+    plt.show()
+
+
+
+
+
 def tensor_to_rgb(tensor):
     # 确保张量在 CPU 上且是 numpy 格式
     tensor = tensor.detach().cpu()
@@ -69,49 +138,49 @@ def tensor_to_rgb(tensor):
     else:
         raise ValueError(f"Unexpected tensor dimensions: {tensor.dim()}")
 
-class DiceLoss(nn.Module):
-    def __init__(self, smooth=1.0):
-        super(DiceLoss, self).__init__()
-        self.smooth = smooth
-        
-    def forward(self, pred, target):
-        # pred: [B, C, H, W]
-        # target: [B, H, W]
-        pred = torch.softmax(pred, dim=1)
-        target = nn.functional.one_hot(target, num_classes=pred.shape[1]).permute(0, 3, 1, 2)
-        
-        intersection = (pred * target).sum(dim=(2, 3))
-        union = pred.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
-        
-        dice = (2. * intersection + self.smooth) / (union + self.smooth)
-        return 1 - dice.mean()
+# class DiceLoss(nn.Module):
+#     def __init__(self, smooth=1.0):
+#         super(DiceLoss, self).__init__()
+#         self.smooth = smooth
+#
+#     def forward(self, pred, target):
+#         # pred: [B, C, H, W]
+#         # target: [B, H, W]
+#         pred = torch.softmax(pred, dim=1)
+#         target = nn.functional.one_hot(target, num_classes=pred.shape[1]).permute(0, 3, 1, 2)
+#
+#         intersection = (pred * target).sum(dim=(2, 3))
+#         union = pred.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
+#
+#         dice = (2. * intersection + self.smooth) / (union + self.smooth)
+#         return 1 - dice.mean()
 
-class MultiTaskLoss(nn.Module):
-    def __init__(self, weights=None):
-        super(MultiTaskLoss, self).__init__()
-        self.dice_loss = DiceLoss()
-        self.ce_loss = nn.CrossEntropyLoss()
-        self.weights = weights if weights is not None else {'cardiac': 1.0, 'scar': 1.0, 'edema': 1.0}
-        
-    def forward(self, predictions, targets):
-        losses = {}
-        total_loss = 0
-        
-        for task in ['cardiac', 'scar', 'edema']:
-            pred = predictions[task]
-            target = targets[f'{task}_label']
-            
-            # 计算Dice Loss和CrossEntropy Loss
-            dice = self.dice_loss(pred, target)
-            ce = self.ce_loss(pred, target)
-            
-            # 组合损失
-            task_loss = dice + ce
-            losses[f'{task}_loss'] = task_loss
-            total_loss += self.weights[task] * task_loss
-            
-        losses['total'] = total_loss
-        return losses
+# class MultiTaskLoss(nn.Module):
+#     def __init__(self, weights=None):
+#         super(MultiTaskLoss, self).__init__()
+#         self.dice_loss = DiceLoss()
+#         self.ce_loss = nn.CrossEntropyLoss()
+#         self.weights = weights if weights is not None else {'cardiac': 1.0, 'scar': 1.0, 'edema': 1.0}
+#
+#     def forward(self, predictions, targets):
+#         losses = {}
+#         total_loss = 0
+#
+#         for task in ['cardiac', 'scar', 'edema']:
+#             pred = predictions[task]
+#             target = targets[f'{task}_label']
+#
+#             # 计算Dice Loss和CrossEntropy Loss
+#             dice = self.dice_loss(pred, target)
+#             ce = self.ce_loss(pred, target)
+#
+#             # 组合损失
+#             task_loss = dice + ce
+#             losses[f'{task}_loss'] = task_loss
+#             total_loss += self.weights[task] * task_loss
+#
+#         losses['total'] = total_loss
+#         return losses
 
 def train_epoch(model, loader, criterion, optimizer, device, epoch, writer):
     model.train()
@@ -202,8 +271,10 @@ def validate(model, loader, criterion, device):
     return avg_loss, avg_task_losses
 
 def TrainProcess(args):
-
-    model = MyoPSNet(in_chs=(3, 2, 2), out_chs=(3, 3, 3)).cuda()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # model = MyoPSNet(in_chs=(3, 2, 2), out_chs=(3, 3, 3)).cuda()
+    # model = MyoPSNet(in_chs=(3, 2, 2), out_chs=(3, 3, 3)).cuda()
+    model = MyoPSNet(in_chs=(3, 2, 2, 1), out_chs=(3, 3, 3, 3)).cuda()
     model.apply(weights_init)
 
     mlsc_loss = MyoPSLoss().cuda()
@@ -242,8 +313,10 @@ def TrainProcess(args):
     # Train_Image = CrossModalDataLoader(path=args.path, file_name='train.txt',
     #                                    dim=args.dim, max_iters=100 * args.batch_size,
     #                                    stage='Train', modalities=args.modalities)
-
-    Train_Image = MultiModalCardiacDataset(data_root=args.path, mode='train', transform=None)
+    Train_Image = CrossModalDataLoader(path=args.path, file_name='train.txt',
+                                       dim=args.dim, max_iters=100 * args.batch_size,
+                                       stage='Train')
+    # Train_Image = MultiModalCardiacDataset(data_root=args.path, mode='train', transform=None)
     
     Train_loader = cycle(DataLoader(Train_Image, batch_size=args.batch_size, shuffle=True, num_workers=4, drop_last=True))
     writer = SummaryWriter(log_dir=os.path.join('runs', time.strftime("%Y%m%d-%H%M%S")))
@@ -251,10 +324,10 @@ def TrainProcess(args):
     IterCount = int(len(Train_Image) / args.batch_size)
 
     # 记录模型结构
-    dummy_input_C0 = torch.randn(1, 1, args.dim, args.dim).cuda()
-    dummy_input_LGE = torch.randn(1, 1, args.dim, args.dim).cuda()
-    dummy_input_T2 = torch.randn(1, 1, args.dim, args.dim).cuda()
-    writer.add_graph(model, (dummy_input_C0, dummy_input_LGE, dummy_input_T2))
+    # dummy_input_C0 = torch.randn(1, 1, args.dim, args.dim).cuda()
+    # dummy_input_LGE = torch.randn(1, 1, args.dim, args.dim).cuda()
+    # dummy_input_T2 = torch.randn(1, 1, args.dim, args.dim).cuda()
+    # # writer.add_graph(model, (dummy_input_C0, dummy_input_LGE, dummy_input_T2))
 
     # 记录训练配置
     writer.add_text('Training Config', f'Batch Size: {args.batch_size}\n'
@@ -271,20 +344,57 @@ def TrainProcess(args):
         
         print(f"Epoch [{epoch+1}/{args.end_epoch}]")
 
+        # train_C0 = torch.FloatTensor(args.batch_size, 1, args.dim, args.dim).cuda()
+        # train_LGE = torch.FloatTensor(args.batch_size, 1, args.dim, args.dim).cuda()
+        # train_T2 = torch.FloatTensor(args.batch_size, 1, args.dim, args.dim).cuda()
+        #
+        # cardiac_gd = torch.FloatTensor(args.batch_size, 3, args.dim, args.dim).cuda()
+        # scar_gd = torch.FloatTensor(args.batch_size, 3, args.dim, args.dim).cuda()
+        # edema_gd = torch.FloatTensor(args.batch_size, 3, args.dim, args.dim).cuda()
+        # Inside the training loop (after loading data):
+
+
+
+        IterCount = int(len(Train_Image) / args.batch_size)
         for iteration in range(IterCount):
             # Load data
             img_C0, img_LGE, img_T2, label_cardiac, label_scar, label_edema, _ = next(Train_loader)
 
-            img_C0 = img_C0.cuda(non_blocking=True)
-            img_LGE = img_LGE.cuda(non_blocking=True)
-            img_T2 = img_T2.cuda(non_blocking=True)
+            train_C0 = img_C0.float().cuda(non_blocking=True)
+            train_LGE = img_LGE.float().cuda(non_blocking=True)
+            train_T2 = img_T2.float().cuda(non_blocking=True)
+
+            # Labels can remain as-is (they're used in loss calculations)
             label_cardiac = label_cardiac.cuda(non_blocking=True)
             label_scar = label_scar.cuda(non_blocking=True)
             label_edema = label_edema.cuda(non_blocking=True)
 
+            # train_C0.copy_(img_C0)
+            # train_LGE.copy_(img_LGE)
+            # train_T2.copy_(img_T2)
+            # cardiac_gd.copy_(label_cardiac)
+            # scar_gd.copy_(label_scar)
+            # edema_gd.copy_(label_edema)
+            # img_C0 = img_C0.cuda(non_blocking=True)
+            # img_LGE = img_LGE.cuda(non_blocking=True)
+            # img_T2 = img_T2.cuda(non_blocking=True)
+            # label_cardiac = label_cardiac.cuda(non_blocking=True)
+            # label_scar = label_scar.cuda(non_blocking=True)
+            # label_edema = label_edema.cuda(non_blocking=True)
+
+            # visualize_medical_images(
+            #     img_C0=img_C0,
+            #     img_LGE=img_LGE,
+            #     img_T2=img_T2,
+            #     label_cardiac=label_cardiac,
+            #     label_scar=label_scar,
+            #     label_edema=label_edema
+            # )
             # Forward
-            seg_C0, seg_LGE, seg_T2 = model(img_C0, img_LGE, img_T2)
-            seg = {'C0': seg_C0, 'LGE': seg_LGE, 'T2': seg_T2}
+            seg_C0, seg_LGE, seg_T2, seg_mapping = model(train_C0, train_LGE, train_T2)
+
+            # seg_C0, seg_LGE, seg_T2 = model(img_C0, img_LGE, img_T2)
+            seg = {'C0': seg_C0, 'LGE': seg_LGE, 'T2': seg_T2,  'mapping': seg_mapping}
             label = {'cardiac': label_cardiac, 'scar': label_scar, 'edema': label_edema}
 
             loss_seg, loss_invariant, loss_inclusive, loss = mlsc_loss(seg, label)
@@ -328,7 +438,11 @@ def TrainProcess(args):
                     C0_rgb = mask_to_rgb(seg_C0[0])
                     LGE_rgb = mask_to_rgb(seg_LGE[0])
                     T2_rgb = mask_to_rgb(seg_T2[0])
-                    
+                    label_cardiac_rgb = mask_to_rgb(label_cardiac[0])
+                    label_scar_rgb = mask_to_rgb(label_scar[0])
+                    label_edema_rgb = mask_to_rgb(label_edema[0])
+                    # label_edema = {'cardiac': label_cardiac, 'scar': label_scar, 'edema': label_edema}
+
                     # 记录原始图像 (单通道图像需要重复三次来显示为灰度图)
                     writer.add_image('Images/C0_Input', img_C0[0].repeat(3, 1, 1), global_step)
                     writer.add_image('Images/LGE_Input', img_LGE[0].repeat(3, 1, 1), global_step)
@@ -338,7 +452,9 @@ def TrainProcess(args):
                     writer.add_image('Segmentation/C0', C0_rgb, global_step)
                     writer.add_image('Segmentation/LGE', LGE_rgb, global_step)
                     writer.add_image('Segmentation/T2', T2_rgb, global_step)
-
+                    writer.add_image('GT/C0', label_cardiac_rgb, global_step)
+                    writer.add_image('GT/LGE', label_edema_rgb, global_step)
+                    writer.add_image('GT/T2', label_scar_rgb, global_step)
                 # 打印训练信息
                 print(f"Iteration: {iteration+1}/{IterCount} - "
                       f"LR: {current_lr:.6f} | "
@@ -422,72 +538,72 @@ def TrainProcess(args):
 
 
 
-def MyoPSNetTrain(args):
-    model = MyoPSNet(in_chs=(5, 2, 2, 3), out_chs=(3, 3, 3, 3)).cuda()
-    # model = MyoPSNet(modalities=args.modalities, out_chs=(3, 3, 3, 3)).cuda()
-    model.apply(weights_init)
-
-    criterion = MyoPSLoss().cuda()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=5e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
-
-    os.makedirs('checkpoints', exist_ok=True)
-    writer = SummaryWriter()
-
-    train_dataset = CrossModalDataLoader(path=args.path, file_name='train.txt',
-                                         dim=args.dim, max_iters=100 * args.batch_size,
-                                         stage='Train', modalities=args.modalities)
-
-    train_loader = cycle(DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, drop_last=True))
-    iter_per_epoch = len(train_dataset) // args.batch_size
-
-    for epoch in range(args.start_epoch, args.end_epoch):
-        model.train()
-
-        for iteration in range(iter_per_epoch):
-            data = next(train_loader)
-            img_C0, img_LGE, img_T2, img_T1m, img_T2starm, label_cardiac, label_scar, label_edema, _ = data
-
-            img_C0 = img_C0.cuda(non_blocking=True)
-            img_LGE = img_LGE.cuda(non_blocking=True)
-            img_T2 = img_T2.cuda(non_blocking=True)
-            img_T1m = img_T1m.cuda(non_blocking=True)
-            img_T2starm = img_T2starm.cuda(non_blocking=True)
-            label_cardiac = label_cardiac.cuda(non_blocking=True)
-            label_scar = label_scar.cuda(non_blocking=True)
-            label_edema = label_edema.cuda(non_blocking=True)
-
-            outputs = model(img_C0, img_LGE, img_T2, img_T1m, img_T2starm)
-            seg = {'C0': outputs[0], 'LGE': outputs[1], 'T2': outputs[2], 'mapping': outputs[3]}
-            label = {'cardiac': label_cardiac, 'scar': label_scar, 'edema': label_edema}
-
-            loss_seg, loss_invariant, loss_inclusive, total_loss = criterion(seg, label)
-
-            optimizer.zero_grad()
-            total_loss.backward()
-            optimizer.step()
-
-            # Logging
-            step = epoch * iter_per_epoch + iteration
-            writer.add_scalar('Loss/Segmentation', loss_seg.item(), step)
-            writer.add_scalar('Loss/Invariant', loss_invariant.item(), step)
-            writer.add_scalar('Loss/Inclusive', loss_inclusive.item(), step)
-            writer.add_scalar('Loss/Total', total_loss.item(), step)
-
-            with open('log_training.txt', 'a') as log:
-                log.write(f"==> Epoch: {epoch+1:03}/{args.end_epoch:03} || Iter: {iteration+1:03}/{iter_per_epoch:03} - ")
-                log.write(f"LR: {optimizer.param_groups[0]['lr']:.6f} | ")
-                log.write(f"loss_seg: {loss_seg.item():.6f} + ")
-                log.write(f"loss_inv: {loss_invariant.item():.6f} + ")
-                log.write(f"loss_inc: {loss_inclusive.item():.6f} = ")
-                log.write(f"total_loss: {total_loss.item():.6f}\n")
-
-        scheduler.step()
-
-        # 可选验证保存
-        # avg_dice = Validation2d(args, epoch, model, Valid_Image, Valid_loader, writer, 'result_validation_2d.txt', tensorboardImage=True)
-        # if avg_dice > args.threshold:
-        #     torch.save(model.state_dict(), os.path.join('checkpoints', f'{avg_dice:.4f}[{epoch+1}].pth'))
+# def MyoPSNetTrain(args):
+#     model = MyoPSNet(in_chs=(5, 2, 2, 3), out_chs=(3, 3, 3, 3)).cuda()
+#     # model = MyoPSNet(modalities=args.modalities, out_chs=(3, 3, 3, 3)).cuda()
+#     model.apply(weights_init)
+#
+#     criterion = MyoPSLoss().cuda()
+#     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=5e-4)
+#     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
+#
+#     os.makedirs('checkpoints', exist_ok=True)
+#     writer = SummaryWriter()
+#
+#     train_dataset = CrossModalDataLoader(path=args.path, file_name='train.txt',
+#                                          dim=args.dim, max_iters=100 * args.batch_size,
+#                                          stage='Train', modalities=args.modalities)
+#
+#     train_loader = cycle(DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, drop_last=True))
+#     iter_per_epoch = len(train_dataset) // args.batch_size
+#
+#     for epoch in range(args.start_epoch, args.end_epoch):
+#         model.train()
+#
+#         for iteration in range(iter_per_epoch):
+#             data = next(train_loader)
+#             img_C0, img_LGE, img_T2, img_T1m, img_T2starm, label_cardiac, label_scar, label_edema, _ = data
+#
+#             img_C0 = img_C0.cuda(non_blocking=True)
+#             img_LGE = img_LGE.cuda(non_blocking=True)
+#             img_T2 = img_T2.cuda(non_blocking=True)
+#             img_T1m = img_T1m.cuda(non_blocking=True)
+#             img_T2starm = img_T2starm.cuda(non_blocking=True)
+#             label_cardiac = label_cardiac.cuda(non_blocking=True)
+#             label_scar = label_scar.cuda(non_blocking=True)
+#             label_edema = label_edema.cuda(non_blocking=True)
+#
+#             outputs = model(img_C0, img_LGE, img_T2, img_T1m, img_T2starm)
+#             seg = {'C0': outputs[0], 'LGE': outputs[1], 'T2': outputs[2], 'mapping': outputs[3]}
+#             label = {'cardiac': label_cardiac, 'scar': label_scar, 'edema': label_edema}
+#
+#             loss_seg, loss_invariant, loss_inclusive, total_loss = criterion(seg, label)
+#
+#             optimizer.zero_grad()
+#             total_loss.backward()
+#             optimizer.step()
+#
+#             # Logging
+#             step = epoch * iter_per_epoch + iteration
+#             writer.add_scalar('Loss/Segmentation', loss_seg.item(), step)
+#             writer.add_scalar('Loss/Invariant', loss_invariant.item(), step)
+#             writer.add_scalar('Loss/Inclusive', loss_inclusive.item(), step)
+#             writer.add_scalar('Loss/Total', total_loss.item(), step)
+#
+#             with open('log_training.txt', 'a') as log:
+#                 log.write(f"==> Epoch: {epoch+1:03}/{args.end_epoch:03} || Iter: {iteration+1:03}/{iter_per_epoch:03} - ")
+#                 log.write(f"LR: {optimizer.param_groups[0]['lr']:.6f} | ")
+#                 log.write(f"loss_seg: {loss_seg.item():.6f} + ")
+#                 log.write(f"loss_inv: {loss_invariant.item():.6f} + ")
+#                 log.write(f"loss_inc: {loss_inclusive.item():.6f} = ")
+#                 log.write(f"total_loss: {total_loss.item():.6f}\n")
+#
+#         scheduler.step()
+#
+#         # 可选验证保存
+#         # avg_dice = Validation2d(args, epoch, model, Valid_Image, Valid_loader, writer, 'result_validation_2d.txt', tensorboardImage=True)
+#         # if avg_dice > args.threshold:
+#         #     torch.save(model.state_dict(), os.path.join('checkpoints', f'{avg_dice:.4f}[{epoch+1}].pth'))
 
 
 

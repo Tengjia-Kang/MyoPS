@@ -104,5 +104,5 @@ def Validation2d(args, epoch, model, valid_image, valid_loader, writer, log_name
     # writer.add_scalar('valid edema 2d', pathology_dice['edema'], epoch)
 
     # avg_dice = (pathology_dice['scar'] + pathology_dice['edema']) / 2
-                return
+    #             return
     # return avg_dice
