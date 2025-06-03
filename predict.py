@@ -33,7 +33,7 @@ def predict(args, model_path, epoch):
     normalize = Normalization()
     keepLCC = LargestConnectedComponents()
     image_transform = ImageTransform(args.dim, 'Test')
-    result_transform = ResultTransform(ToOriginal=True)
+    result_transform = ResultTransform()
     cases = []
     for root, dirs, files in os.walk(args.test_folder):
         for dir_name in dirs:
@@ -41,7 +41,7 @@ def predict(args, model_path, epoch):
             cases.append(full_path)
     # for i in range(int(len(test_img))):
     for case in cases:
-        case_name = case.split('/')[-1]
+        case_name = case.split('\\')[-1]
         prefix_data = os.path.join(case, case_name)
         # get data [x,y,z]
         C0_raw = nib.load(prefix_data + '_C0.nii.gz')
@@ -64,6 +64,7 @@ def predict(args, model_path, epoch):
         test_LGE = torch.FloatTensor(1, 1, args.dim, args.dim)
         test_T2 = torch.FloatTensor(1, 1, args.dim, args.dim)
 
+        seg_C0 = torch.FloatTensor(dim_z, args.dim, args.dim)
         seg_LGE = torch.FloatTensor(dim_z, args.dim, args.dim)
         seg_T2 = torch.FloatTensor(dim_z, args.dim, args.dim)
         seg_mapping = torch.FloatTensor(dim_z, args.dim, args.dim)
@@ -82,17 +83,20 @@ def predict(args, model_path, epoch):
             # test_T1m.copy_(img_T1m_slice.unsqueeze(0))
             # test_T2starm.copy_(img_T2starm_slice.unsqueeze(0))
 
-            _, res_LGE, res_T2, res_mapping = model(test_C0, test_LGE, test_T2)
+            res_C0, res_LGE, res_T2, res_mapping = model(test_C0, test_LGE, test_T2)
 
+
+            seg_C0[j:j+1,:,:].copy_(torch.argmax(res_C0, dim=1))
             seg_LGE[j:j+1,:,:].copy_(torch.argmax(res_LGE, dim=1))
             seg_T2[j:j+1,:,:].copy_(torch.argmax(res_T2, dim=1))
             seg_mapping[j:j+1,:,:].copy_(torch.argmax(res_mapping, dim=1))
       
         # post process
+        seg_C0 = keepLCC(seg_C0, 'scar')
         seg_LGE = keepLCC(seg_LGE, 'scar')
         seg_T2 = keepLCC(seg_T2, 'edema')
         seg_mapping = keepLCC(seg_mapping, 'scar')
-        seg_pathology = result_transform(seg_LGE, seg_mapping, seg_T2)
+        seg_pathology = result_transform(seg_C0, seg_LGE, seg_T2)
 
         result[:, dim_x//2-args.dim//2:dim_x//2+args.dim//2, dim_y//2-args.dim//2:dim_y//2+args.dim//2].copy_(seg_pathology)
         result = result.numpy().transpose(1,2,0)
@@ -126,4 +130,4 @@ def predict_multiple(args):
 if __name__ == '__main__':
     args = config()
     # predict_multiple(args)
-    predict(args, "checkpoints/checkpoint_epoch15.pth", str(time.time()))
+    predict(args, "checkpoints/checkpoint_epoch40.pth", str(time.time()))
